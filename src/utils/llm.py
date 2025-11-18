@@ -46,7 +46,19 @@ def call_llm(
             api_keys = request.api_keys
 
     model_info = get_model_info(model_name, model_provider)
-    llm = get_model(model_name, model_provider, api_keys)
+    
+    # Convert string to ModelProvider enum if necessary
+    from src.llm.models import ModelProvider
+    if isinstance(model_provider, str):
+        try:
+            model_provider_enum = ModelProvider(model_provider)
+        except ValueError:
+            # Fallback to OpenAI if invalid provider
+            model_provider_enum = ModelProvider.OPENAI
+    else:
+        model_provider_enum = model_provider
+    
+    llm = get_model(model_name, model_provider_enum, api_keys)
 
     # For non-JSON support models, we can use structured output
     if not (model_info and not model_info.has_json_mode()):
@@ -60,6 +72,12 @@ def call_llm(
         try:
             # Call the LLM
             result = llm.invoke(prompt)
+            
+            # Debug: print the raw result
+            if agent_name and "portfolio" in agent_name.lower():
+                print(f"🔍 LLM 原始响应: {result}")
+                if hasattr(result, 'content'):
+                    print(f"🔍 LLM 内容: {result.content}")
 
             # For non-JSON support models, we need to extract and parse the JSON manually
             if model_info and not model_info.has_json_mode():
@@ -107,8 +125,15 @@ def create_default_response(model_class: type[BaseModel]) -> BaseModel:
 
 
 def extract_json_from_response(content: str) -> dict | None:
-    """Extracts JSON from markdown-formatted response."""
+    """Extracts JSON from markdown-formatted response or direct JSON."""
     try:
+        # First try to parse the content directly as JSON
+        try:
+            return json.loads(content.strip())
+        except json.JSONDecodeError:
+            pass
+        
+        # If that fails, look for markdown-formatted JSON
         json_start = content.find("```json")
         if json_start != -1:
             json_text = content[json_start + 7 :]  # Skip past ```json
@@ -116,9 +141,48 @@ def extract_json_from_response(content: str) -> dict | None:
             if json_end != -1:
                 json_text = json_text[:json_end].strip()
                 return json.loads(json_text)
+        
+        # If no markdown format, try to find JSON-like content
+        # Look for content between { and }
+        start_brace = content.find("{")
+        if start_brace != -1:
+            # Find the matching closing brace
+            brace_count = 0
+            end_brace = start_brace
+            for i, char in enumerate(content[start_brace:], start_brace):
+                if char == "{":
+                    brace_count += 1
+                elif char == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_brace = i
+                        break
+            
+            if end_brace > start_brace:
+                json_text = content[start_brace:end_brace + 1]
+                # Try to fix common JSON formatting issues
+                json_text = fix_json_formatting(json_text)
+                return json.loads(json_text)
+                
     except Exception as e:
         print(f"Error extracting JSON from response: {e}")
+        print(f"Content: {repr(content)}")
     return None
+
+
+def fix_json_formatting(json_text: str) -> str:
+    """Fix common JSON formatting issues."""
+    import re
+    
+    # Fix missing commas between key-value pairs
+    # Pattern: "value""key" -> "value","key"
+    json_text = re.sub(r'("(?:[^"\\]|\\.)*")("(?:[^"\\]|\\.)*")', r'\1,\2', json_text)
+    
+    # Fix missing commas between number and string
+    # Pattern: 35"reasoning" -> 35,"reasoning"
+    json_text = re.sub(r'(\d+)("(?:[^"\\]|\\.)*")', r'\1,\2', json_text)
+    
+    return json_text
 
 
 def get_agent_model_config(state, agent_name):
