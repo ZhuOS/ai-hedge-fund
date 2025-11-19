@@ -217,25 +217,37 @@ def main():
         include_reasoning_flag=True,
     )
     
+    # Check for live trading environment variable
+    import os
+    enable_live_trading = os.getenv('ENABLE_LIVE_TRADING', 'false').lower() == 'true'
+    
     # Trading configuration
     trading_config = TradeConfig(
-        futu_host="127.0.0.1",
-        futu_port=11111,
-        dry_run=True,  # Safe mode by default
-        max_position_size=5000.0,
-        max_daily_trades=10,
-        enable_short_selling=False,
-        log_trades=False,  # Simplified logging
-        log_level="WARNING"  # Less verbose
+        futu_host=os.getenv('FUTU_HOST', '127.0.0.1'),
+        futu_port=int(os.getenv('FUTU_PORT', '11111')),
+        trading_account=os.getenv('FUTU_ACCOUNT_ID'),
+        trading_pwd=os.getenv('FUTU_TRADING_PWD'),
+        dry_run=not enable_live_trading,  # Use environment variable to control
+        max_position_size=float(os.getenv('MAX_POSITION_SIZE', '5000.0')),
+        max_daily_trades=int(os.getenv('MAX_DAILY_TRADES', '10')),
+        max_order_value=float(os.getenv('MAX_ORDER_VALUE', '10000.0')),
+        enable_short_selling=os.getenv('ENABLE_SHORT_SELLING', 'false').lower() == 'true',
+        log_trades=True,  # Always log for audit trail
+        log_level=os.getenv('LOG_LEVEL', 'INFO')
     )
     
-    # Confirm live trading mode
-    if not trading_config.dry_run:
-        print(f"\n{Fore.RED}⚠️  WARNING: LIVE TRADING MODE ENABLED{Style.RESET_ALL}")
+    # Display trading mode
+    if trading_config.dry_run:
+        print(f"\n{Fore.GREEN}📝 DRY RUN MODE - No real trades will be executed{Style.RESET_ALL}")
+    else:
+        print(f"\n{Fore.RED}⚠️  LIVE TRADING MODE ENABLED{Style.RESET_ALL}")
         print(f"{Fore.RED}💰 REAL MONEY WILL BE AT RISK{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Account: {trading_config.trading_account or 'Default'}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Max Position Size: ${trading_config.max_position_size:,.2f}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Max Order Value: ${trading_config.max_order_value:,.2f}{Style.RESET_ALL}")
         
-        confirmation = input(f"{Fore.YELLOW}Are you sure you want to proceed? (type 'YES' to confirm): {Style.RESET_ALL}")
-        if confirmation != 'YES':
+        confirmation = input(f"\n{Fore.YELLOW}Type 'CONFIRM LIVE TRADING' to proceed with real money: {Style.RESET_ALL}")
+        if confirmation != 'CONFIRM LIVE TRADING':
             print(f"{Fore.GREEN}✅ Cancelled for safety{Style.RESET_ALL}")
             return
     

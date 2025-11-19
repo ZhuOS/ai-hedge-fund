@@ -136,7 +136,50 @@ class FutuTrader(BaseTrader):
                     "buying_power": 50000.0
                 }
             
-            # For real trading, would implement actual API calls
+            # For real trading, implement actual Futu API calls
+            if self.trade_ctx:
+                try:
+                    # Get account list first
+                    ret, acc_list = self.trade_ctx.get_acc_list()
+                    if ret != ft.RET_OK:
+                        self.logger.error(f"Failed to get account list: {acc_list}")
+                        return None
+                    
+                    # Use the first account if no specific account is configured
+                    account_id = self.config.trading_account
+                    if not account_id and not acc_list.empty:
+                        account_id = acc_list.iloc[0]['acc_id']
+                    
+                    if not account_id:
+                        self.logger.error("No trading account available")
+                        return None
+                    
+                    # Get account info
+                    ret, acc_info = self.trade_ctx.accinfo_query(acc_id=account_id)
+                    if ret != ft.RET_OK:
+                        self.logger.error(f"Failed to get account info: {acc_info}")
+                        return None
+                    
+                    if acc_info.empty:
+                        return None
+                    
+                    info = acc_info.iloc[0]
+                    return {
+                        "account_id": account_id,
+                        "total_assets": float(info.get('total_assets', 0)),
+                        "cash": float(info.get('cash', 0)),
+                        "market_value": float(info.get('market_val', 0)),
+                        "unrealized_pnl": float(info.get('unrealized_pl', 0)),
+                        "realized_pnl": float(info.get('realized_pl', 0)),
+                        "buying_power": float(info.get('avl_withdrawal_cash', info.get('cash', 0)))
+                    }
+                    
+                except Exception as e:
+                    self.logger.error(f"Error calling Futu API for account info: {e}")
+                    return None
+            
+            # Fallback to demo data if trade context not available
+            self.logger.warning("Trade context not available, returning demo data")
             return {
                 "account_id": "DEMO_ACCOUNT",
                 "total_assets": 100000.0,
@@ -160,6 +203,44 @@ class FutuTrader(BaseTrader):
             if self.config.dry_run:
                 # Return empty positions for dry run
                 return []
+            
+            # For real trading, implement actual Futu API calls
+            if self.trade_ctx:
+                try:
+                    # Get account ID
+                    account_id = self.config.trading_account
+                    if not account_id:
+                        ret, acc_list = self.trade_ctx.get_acc_list()
+                        if ret == ft.RET_OK and not acc_list.empty:
+                            account_id = acc_list.iloc[0]['acc_id']
+                        else:
+                            return []
+                    
+                    # Get positions
+                    ret, positions = self.trade_ctx.position_list_query(acc_id=account_id)
+                    if ret != ft.RET_OK:
+                        self.logger.error(f"Failed to get positions: {positions}")
+                        return []
+                    
+                    if positions.empty:
+                        return []
+                    
+                    result = []
+                    for _, pos in positions.iterrows():
+                        result.append({
+                            "symbol": pos.get('code', ''),
+                            "quantity": int(pos.get('qty', 0)),
+                            "avg_cost": float(pos.get('cost_price', 0)),
+                            "market_value": float(pos.get('market_val', 0)),
+                            "unrealized_pnl": float(pos.get('unrealized_pl', 0)),
+                            "market_price": float(pos.get('cur_price', 0))
+                        })
+                    
+                    return result
+                    
+                except Exception as e:
+                    self.logger.error(f"Error calling Futu API for positions: {e}")
+                    return []
             
             return []
             
@@ -219,8 +300,150 @@ class FutuTrader(BaseTrader):
         if self.config.dry_run:
             return await self._simulate_order(order, order_id, submit_time)
         
-        # Execute real trade (placeholder)
-        return await self._simulate_order(order, order_id, submit_time)
+        # Execute real trade
+        try:
+            if self.trade_ctx:
+                # Get account ID
+                account_id = self.config.trading_account
+                if not account_id:
+                    ret, acc_list = self.trade_ctx.get_acc_list()
+                    if ret == ft.RET_OK and not acc_list.empty:
+                        account_id = acc_list.iloc[0]['acc_id']
+                    else:
+                        return TradeResult(
+                            order_id=order_id,
+                            symbol=order.symbol,
+                            side=order.side,
+                            quantity=order.quantity,
+                            filled_quantity=0,
+                            status=OrderStatus.REJECTED,
+                            submit_time=submit_time,
+                            error_msg="No trading account available"
+                        )
+                
+                # Convert to Futu format
+                futu_symbol = self._convert_to_futu_symbol(order.symbol)
+                futu_side = ft.TrdSide.BUY if order.side == TradeSide.BUY else ft.TrdSide.SELL
+                futu_order_type = ft.OrderType.MARKET if order.order_type == OrderType.MARKET else ft.OrderType.NORMAL
+                
+                # Unlock trading if password is provided
+                if self.config.trading_pwd:
+                    ret, data = self.trade_ctx.unlock_trade(password=self.config.trading_pwd)
+                    if ret != ft.RET_OK:
+                        self.logger.error(f"Failed to unlock trading: {data}")
+                        return TradeResult(
+                            order_id=order_id,
+                            symbol=order.symbol,
+                            side=order.side,
+                            quantity=order.quantity,
+                            filled_quantity=0,
+                            status=OrderStatus.REJECTED,
+                            submit_time=submit_time,
+                            error_msg="Failed to unlock trading"
+                        )
+                
+                # Submit order
+                ret, order_data = self.trade_ctx.place_order(
+                    price=order.price if order.price else 0,
+                    qty=order.quantity,
+                    code=futu_symbol,
+                    trd_side=futu_side,
+                    order_type=futu_order_type,
+                    acc_id=account_id
+                )
+                
+                if ret != ft.RET_OK:
+                    return TradeResult(
+                        order_id=order_id,
+                        symbol=order.symbol,
+                        side=order.side,
+                        quantity=order.quantity,
+                        filled_quantity=0,
+                        status=OrderStatus.REJECTED,
+                        submit_time=submit_time,
+                        error_msg=f"Order submission failed: {order_data}"
+                    )
+                
+                # Get the order ID from Futu
+                if not order_data.empty:
+                    futu_order_id = order_data.iloc[0]['order_id']
+                    
+                    # Wait a bit and check order status
+                    import asyncio
+                    await asyncio.sleep(1)
+                    
+                    ret, order_status = self.trade_ctx.order_list_query(
+                        order_id=futu_order_id,
+                        acc_id=account_id
+                    )
+                    
+                    if ret == ft.RET_OK and not order_status.empty:
+                        status_info = order_status.iloc[0]
+                        filled_qty = int(status_info.get('dealt_qty', 0))
+                        avg_price = float(status_info.get('dealt_avg_price', 0))
+                        
+                        # Map Futu order status to our status
+                        futu_status = status_info.get('order_status', '')
+                        if futu_status == "FILLED_ALL":
+                            status = OrderStatus.FILLED
+                        elif futu_status == "FILLED_PART":
+                            status = OrderStatus.PARTIALLY_FILLED
+                        elif futu_status in ["CANCELLED_ALL", "CANCELLED_PART"]:
+                            status = OrderStatus.CANCELLED
+                        elif futu_status in ["FAILED", "DISABLED"]:
+                            status = OrderStatus.FAILED
+                        else:
+                            status = OrderStatus.SUBMITTED
+                        
+                        self.logger.info(f"Order executed: {filled_qty}/{order.quantity} @ ${avg_price:.2f}")
+                        
+                        return TradeResult(
+                            order_id=futu_order_id,
+                            symbol=order.symbol,
+                            side=order.side,
+                            quantity=order.quantity,
+                            filled_quantity=filled_qty,
+                            avg_price=avg_price if avg_price > 0 else None,
+                            status=status,
+                            submit_time=submit_time,
+                            update_time=datetime.now()
+                        )
+                
+                # If we can't get status, return submitted status
+                return TradeResult(
+                    order_id=order_id,
+                    symbol=order.symbol,
+                    side=order.side,
+                    quantity=order.quantity,
+                    filled_quantity=0,
+                    status=OrderStatus.SUBMITTED,
+                    submit_time=submit_time
+                )
+                
+            else:
+                return TradeResult(
+                    order_id=order_id,
+                    symbol=order.symbol,
+                    side=order.side,
+                    quantity=order.quantity,
+                    filled_quantity=0,
+                    status=OrderStatus.FAILED,
+                    submit_time=submit_time,
+                    error_msg="Trade context not available"
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Error executing real trade: {e}")
+            return TradeResult(
+                order_id=order_id,
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                filled_quantity=0,
+                status=OrderStatus.FAILED,
+                submit_time=submit_time,
+                error_msg=str(e)
+            )
     
     async def _simulate_order(self, order: TradeOrder, order_id: str, submit_time: datetime) -> TradeResult:
         """Simulate order execution in dry run mode"""
